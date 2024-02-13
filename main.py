@@ -1,3 +1,5 @@
+from threading import Thread
+from time import perf_counter
 import numpy as np
 import pygame as pg
 from functools import wraps
@@ -35,7 +37,7 @@ def split_list(lst, n):
     return [lst[i:i+n] for i in range(0, len(lst), n)]
 
 
-@memoize(10) # memoize
+@memoize(-1) # memoize
 def load_image(filename, palette=None):
     print(f"loading image {filename}")
     if palette is None:
@@ -54,27 +56,38 @@ def load_image(filename, palette=None):
         PALETTE = (n >> 1) % 2
         # Get width and height
         width, height = int.from_bytes(f.read(2), "little"), int.from_bytes(f.read(2), "little")
-        collected_data = []
+        conv = pg.surfarray.array3d(pg.surface.Surface((width, height)))
         table = f.read()
-        colors = split_list(table, 1 if GRAYSCALE or PALETTE else 3)
-        result = colors
-        if PALETTE:
-            result = []
-            for i in colors:
-                result.append(bytes(dict(palette).get(int.from_bytes(i)%max(dict(palette).keys()))))
-        collected_data.extend(result)
+        def _(conv, table, palette):
+            done = 0
+            while done < conv.shape[0]*conv.shape[1]:
+                t = perf_counter()
+                collected_data = []
+                colors = split_list(table, 1 if GRAYSCALE or PALETTE else 3)
+                result = colors
+                if PALETTE:
+                    result = []
+                    for idx, i in enumerate(colors):
+                        if perf_counter() - t > 1 or idx < done:
+                            result.append(conv[(idx)%conv.shape[0],(idx)//conv.shape[0] % conv.shape[1]].tobytes())
+                            continue
+                        result.append(bytes(dict(palette).get(int.from_bytes(i, 'little')%max(dict(palette).keys()))))
+                        done += 1
+                else:
+                    done = conv.shape[0]*conv.shape[1]
+                collected_data.extend(result)
 
-        collected_data = collected_data[:width*height]
-        collected_data = collected_data + [bytes([0,0,0])] * (width*height - len(collected_data))
-        l = split_list([int(i.hex(), 16) for i in collected_data], width)
-        image = np.array(l)
-        conv = pg.surfarray.array3d(pg.surface.Surface((image.shape[1], image.shape[0])))
-        if GRAYSCALE:
-            conv[:,:,:] = np.array([image & 0xff]*3).transpose()
-        else:
-            conv[:,:,0] = (image.transpose() >> 16) & 0xff
-            conv[:,:,1] = (image.transpose() >> 8) & 0xff
-            conv[:,:,2] = image.transpose() & 0xff
+                collected_data = collected_data[:width*height]
+                collected_data = collected_data + [bytes([0,0,0])] * (width*height - len(collected_data))
+                l = split_list([int(i.hex(), 16) for i in collected_data], width)
+                image = np.array(l)
+                if GRAYSCALE:
+                    conv[:,:,:] = np.array([image & 0xff]*3).transpose()
+                else:
+                    conv[:,:,0] = (image.transpose() >> 16) & 0xff
+                    conv[:,:,1] = (image.transpose() >> 8) & 0xff
+                    conv[:,:,2] = image.transpose() & 0xff
+        Thread(target=_, args=(conv,table, palette), daemon=True).start()
         return conv
         
 
@@ -88,9 +101,7 @@ def load_palette(filename):
             # This is not a palette file, so just return nothing
             return 2
         colors = split_list(f.read(), 3)
-        d = {}
-        for i, v in enumerate(colors):
-            d.update({i: v})
+        d = dict(enumerate(colors))
         
         class P:
             def __init__(self, org, cache={}):
@@ -116,7 +127,8 @@ def main():
     #     8:  (127, 127, 127), 9:  (127, 000, 000), 10: (000, 127, 000), 11: (000, 000, 127),
     #     12: (127, 127, 000), 13: (000, 127, 127), 14: (127, 000, 127), 15: (000, 000, 000),
     # }.items())
-    palette = load_palette('assets/palettes/p1.asd')
+    palette = load_palette('assets/palettes/out_pal.asd')
+    curimg = 'out'
 
     running = True
     while running:
@@ -124,11 +136,17 @@ def main():
             if e.type == pg.QUIT:
                 running = False
             if e.type == pg.MOUSEBUTTONDOWN:
-                palette.reload()
-                load_image.remem()
+                if e.button == pg.BUTTON_LEFT:
+                    palette.reload()
+                    curimg = 'out' if curimg != 'out' else 'out2'
+                    load_image.remem()
+                elif e.button == pg.BUTTON_RIGHT:
+                    load_image.remem()
 
-        conv = load_image("assets/images/out.asd", palette())
-        screen = pg.display.set_mode([max(100,min(2000, i)) for i in conv.shape[:2]])
+        conv = load_image(f"assets/images/{curimg}.asd", palette())
+        new_dim = [max(100,min(2000, i)) for i in conv.shape[:2]]
+        if screen.get_width() != new_dim[0] and screen.get_height() != new_dim[1]:
+            screen = pg.display.set_mode(new_dim)
         if isinstance(conv, np.ndarray):
             # print(image)
             
@@ -142,6 +160,8 @@ def main():
         pg.display.flip()
 
         clock.tick(24)
+
+import cProfile
 
 if __name__ == "__main__":
     main()
